@@ -1,0 +1,218 @@
+// SecurityConfig.java
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
+import org.springframework.security.oauth2.jwt.Jwt;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Configuration
+public class SecurityConfig {
+
+    // Converter: extract both realm and client roles as ROLE_*
+    private JwtAuthenticationConverter keycloakRolesConverter() {
+        var converter = new JwtAuthenticationConverter();
+        converter.setJwtGrantedAuthoritiesConverter(jwt -> {
+            Set<String> roles = new HashSet<>();
+
+            Map<String, Object> realmAccess = jwt.getClaimAsMap("realm_access");
+            if (realmAccess != null) {
+                Object r = realmAccess.get("roles");
+                if (r instanceof Collection) {
+                    roles.addAll(((Collection<?>) r).stream()
+                            .map(Object::toString)
+                            .collect(Collectors.toSet()));
+                }
+            }
+
+            Map<String, Object> resourceAccess = jwt.getClaimAsMap("resource_access");
+            if (resourceAccess != null) {
+                resourceAccess.values().forEach(v -> {
+                    if (v instanceof Map) {
+                        Object rs = ((Map<?, ?>) v).get("roles");
+                        if (rs instanceof Collection) {
+                            roles.addAll(((Collection<?>) rs).stream()
+                                    .map(Object::toString)
+                                    .collect(Collectors.toSet()));
+                        }
+                    }
+                });
+            }
+
+            return roles.stream()
+                    .map(r -> "ROLE_" + r)  // Spring expects ROLE_ prefix for hasRole()
+                    .map(org.springframework.security.core.authority.SimpleGrantedAuthority::new)
+                    .collect(Collectors.toSet());
+        });
+        return converter;
+    }
+
+    /**
+     * Chain #1 — Keycloak-only endpoints. Leaves your existing auth flow untouched.
+     * Everything under /kc-test/** will require a valid Keycloak JWT.
+     */
+    @Bean
+    @Order(1)
+    SecurityFilterChain keycloakChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/kc-test/**")
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers(HttpMethod.GET, "/kc-test/hello").hasRole("USER")
+                .anyRequest().authenticated()
+            )
+            .oauth2ResourceServer(oauth2 -> oauth2
+                .jwt(jwt -> jwt.jwtAuthenticationConverter(keycloakRolesConverter()))
+            )
+            .cors(cors -> {}) // optional; configure if your React calls this directly
+            .csrf(csrf -> csrf.disable());
+        return http.build();
+    }
+
+    /**
+     * Chain #2 — Your existing app (keep it as-is).
+     * Replace with your current configuration/filter chain.
+     */
+    @Bean
+    @Order(2)
+    SecurityFilterChain existingAppChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -> auth
+                .anyRequest().permitAll() // <-- keep your existing behavior here
+            )
+            .csrf(csrf -> csrf.disable());
+        return http.build();
+    }
+}
+
+
+
+
+// KcTestController.java
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Map;
+
+@RestController
+public class KcTestController {
+
+    @GetMapping("/kc-test/hello")
+    public Map<String, Object> hello(@AuthenticationPrincipal Jwt jwt) {
+        return Map.of(
+                "message", "Hello from Keycloak-protected endpoint!",
+                "subject", jwt.getSubject(),
+                "preferred_username", jwt.getClaim("preferred_username"),
+                "roles", jwt.getClaimAsMap("realm_access")
+        );
+    }
+}
+
+
+
+
+// src/oidc.ts
+import { UserManager, WebStorageStateStore } from "oidc-client-ts";
+
+export const userManager = new UserManager({
+  authority: "http://localhost:8081/realms/demo",
+  client_id: "react-spa",
+  redirect_uri: "http://localhost:3000/oidc-callback",
+  response_type: "code",
+  scope: "openid profile email",
+  loadUserInfo: true,
+  automaticSilentRenew: true,
+  userStore: new WebStorageStateStore({ store: window.localStorage }),
+});
+
+
+// src/KeycloakTest.tsx
+import React, { useEffect, useState } from "react";
+import { userManager } from "./oidc";
+import jwtDecode from "jwt-decode";
+
+export default function KeycloakTest() {
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [roles, setRoles] = useState<string[]>([]);
+  const [apiResult, setApiResult] = useState<any>(null);
+
+  const login = async () => {
+    await userManager.signinRedirect();
+  };
+
+  const callApi = async () => {
+    if (!accessToken) return;
+    const res = await fetch("http://localhost:8080/kc-test/hello", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    setApiResult(await res.json());
+  };
+
+  useEffect(() => {
+    userManager.getUser().then(user => {
+      if (user && user.access_token) {
+        setAccessToken(user.access_token);
+        const decoded: any = jwtDecode(user.access_token);
+        const realmRoles: string[] = decoded?.realm_access?.roles ?? [];
+        setRoles(realmRoles);
+      }
+    });
+  }, []);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h2>Keycloak OIDC Test</h2>
+      {!accessToken ? (
+        <button onClick={login}>Login with Keycloak</button>
+      ) : (
+        <>
+          <div><b>Token present:</b> yes</div>
+          <div><b>Realm roles:</b> {roles.join(", ") || "(none)"} </div>
+          <button onClick={callApi}>Call /kc-test/hello</button>
+          <pre>{apiResult ? JSON.stringify(apiResult, null, 2) : null}</pre>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+
+// src/OidcCallback.tsx
+import React, { useEffect } from "react";
+import { userManager } from "./oidc";
+
+export default function OidcCallback() {
+  useEffect(() => {
+    (async () => {
+      await userManager.signinRedirectCallback();
+      window.location.replace("/keycloak-test");
+    })();
+  }, []);
+  return <div>Completing login…</div>;
+}
+
+
+
+// src/App.tsx
+import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
+import KeycloakTest from "./KeycloakTest";
+import OidcCallback from "./OidcCallback";
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <nav><Link to="/keycloak-test">Keycloak Test</Link></nav>
+      <Routes>
+        <Route path="/keycloak-test" element={<KeycloakTest />} />
+        <Route path="/oidc-callback" element={<OidcCallback />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
