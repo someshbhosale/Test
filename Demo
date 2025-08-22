@@ -133,6 +133,7 @@ export const userManager = new UserManager({
 
 
 // src/KeycloakTest.tsx
+
 import React, { useEffect, useState } from "react";
 import { userManager } from "./oidc";
 import jwtDecode from "jwt-decode";
@@ -155,7 +156,7 @@ export default function KeycloakTest() {
   };
 
   useEffect(() => {
-    userManager.getUser().then(user => {
+    userManager.getUser().then((user) => {
       if (user && user.access_token) {
         setAccessToken(user.access_token);
         const decoded: any = jwtDecode(user.access_token);
@@ -166,18 +167,44 @@ export default function KeycloakTest() {
   }, []);
 
   return (
-    <div style={{ padding: 24 }}>
-      <h2>Keycloak OIDC Test</h2>
-      {!accessToken ? (
-        <button onClick={login}>Login with Keycloak</button>
-      ) : (
-        <>
-          <div><b>Token present:</b> yes</div>
-          <div><b>Realm roles:</b> {roles.join(", ") || "(none)"} </div>
-          <button onClick={callApi}>Call /kc-test/hello</button>
-          <pre>{apiResult ? JSON.stringify(apiResult, null, 2) : null}</pre>
-        </>
-      )}
+    <div className="container mt-5">
+      <div className="card shadow-lg">
+        <div className="card-header bg-primary text-white">
+          <h4 className="mb-0">🔐 Keycloak OIDC Test</h4>
+        </div>
+        <div className="card-body">
+          {!accessToken ? (
+            <div className="text-center">
+              <button onClick={login} className="btn btn-success btn-lg">
+                Login with Keycloak
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="alert alert-info">
+                <b>Token present:</b> ✅ Yes
+              </div>
+              <div className="mb-3">
+                <b>Realm roles:</b>{" "}
+                <span className="badge bg-secondary">
+                  {roles.length > 0 ? roles.join(", ") : "No roles"}
+                </span>
+              </div>
+              <button onClick={callApi} className="btn btn-primary">
+                Call /kc-test/hello
+              </button>
+              {apiResult && (
+                <div className="mt-3">
+                  <h5>API Response:</h5>
+                  <pre className="bg-light p-3 rounded border">
+                    {JSON.stringify(apiResult, null, 2)}
+                  </pre>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
